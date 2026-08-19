@@ -3,6 +3,7 @@ import childProcess from "node:child_process";
 import fsSync from "node:fs";
 
 const DARWIN_PS_TIMEOUT_MS = 1000;
+const WINDOWS_WMIC_TIMEOUT_MS = 1500;
 
 function isValidPid(pid: number): boolean {
   return Number.isInteger(pid) && pid > 0;
@@ -104,10 +105,48 @@ export function getProcessStartTime(pid: number): number | null {
   }
 }
 
+/**
+ * Read the Windows process creation time (WMIC CreationDate, e.g.
+ * "20260819115506.123456-420") used to catch PID recycling on win32, where
+ * neither the Linux procfs nor the Darwin `ps lstart` path applies.
+ */
+function getWindowsProcessStartTime(pid: number): number | null {
+  try {
+    const output = childProcess
+      .execFileSync(
+        "wmic",
+        ["process", "where", `ProcessId=${pid}`, "get", "CreationDate", "/value"],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: WINDOWS_WMIC_TIMEOUT_MS,
+          windowsHide: true,
+        },
+      )
+      .trim();
+    const match = output.match(/CreationDate=(\d{14})/);
+    if (!match) {
+      return null;
+    }
+    const raw = match[1];
+    const isoLike = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T${raw.slice(8, 10)}:${raw.slice(10, 12)}:${raw.slice(12, 14)}Z`;
+    const startedAtMs = Date.parse(isoLike);
+    return Number.isFinite(startedAtMs) ? Math.floor(startedAtMs / 1000) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Read a cross-platform process identity for filesystem lock ownership. */
 export function getFileLockProcessStartTime(pid: number): number | null {
   if (!isValidPid(pid)) {
     return null;
   }
-  return process.platform === "darwin" ? getDarwinProcessStartTime(pid) : getProcessStartTime(pid);
+  if (process.platform === "darwin") {
+    return getDarwinProcessStartTime(pid);
+  }
+  if (process.platform === "win32") {
+    return getWindowsProcessStartTime(pid);
+  }
+  return getProcessStartTime(pid);
 }
