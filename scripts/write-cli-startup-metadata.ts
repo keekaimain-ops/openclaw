@@ -820,7 +820,20 @@ async function renderSourceBrowserHelpText(
   // tsx source render (registerBrowserCli + configureProgramHelp) while
   // avoiding a tsx evaluation of the whole browser CLI import graph, which
   // dominated this script's wall time.
-  return await renderSourceCommandHelpText("browser", renderContext, taskContext);
+  //
+  // Known issue: loading the bundled browser plugin through the CLI's normal
+  // plugin loader can throw on some hosts even with a fully-populated,
+  // unmodified environment (reproducible outside this script too), so a
+  // failure here must not abort the whole metadata write - fall back to an
+  // empty string and let the other precomputed help text still be written.
+  try {
+    return await renderSourceCommandHelpText("browser", renderContext);
+  } catch (error) {
+    console.warn(
+      `[write-cli-startup-metadata] Skipping precomputed browser help text: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return "";
+  }
 }
 
 async function renderSourceCommandHelpText(
@@ -865,6 +878,23 @@ async function renderSourceCommandHelpTextRecord(
     commands,
     async (commandName) => {
       if (supervisor.signal.aborted) {
+        return;
+      }
+      // Known issue: loading the bundled browser plugin through the CLI's
+      // normal plugin loader can throw even with a fully-populated,
+      // unmodified environment (reproducible outside this script too). Don't
+      // let that abort the whole render group and discard every other
+      // already-rendered command's help text - fall back to an empty string
+      // for "browser" instead.
+      if (commandName === "browser") {
+        try {
+          helpTexts[commandName] = await renderSourceCommandHelpText(commandName, renderContext);
+        } catch (error) {
+          console.warn(
+            `[write-cli-startup-metadata] Skipping precomputed browser help text: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          helpTexts[commandName] = "";
+        }
         return;
       }
       try {
