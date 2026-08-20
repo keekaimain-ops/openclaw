@@ -827,13 +827,31 @@ async function renderSourceBrowserHelpText(
   // failure here must not abort the whole metadata write - fall back to an
   // empty string and let the other precomputed help text still be written.
   try {
-    return await renderSourceCommandHelpText("browser", renderContext);
+    return await renderSourceCommandHelpText(
+      "browser",
+      renderContext,
+      withoutGroupAbort(taskContext),
+    );
   } catch (error) {
     console.warn(
       `[write-cli-startup-metadata] Skipping precomputed browser help text: ${error instanceof Error ? error.message : String(error)}`,
     );
     return "";
   }
+}
+
+/**
+ * Wraps a render task context so a failure signalled through it never
+ * aborts the shared render group, while still honoring the group's existing
+ * abort signal for cooperative cancellation. Used for the "browser" render,
+ * whose known plugin-loader failure (see renderSourceBrowserHelpText) must
+ * not discard every other command's already-rendered help text.
+ */
+function withoutGroupAbort(taskContext?: RenderTaskContext): RenderTaskContext | undefined {
+  if (!taskContext) {
+    return undefined;
+  }
+  return { reportFailure: () => {}, signal: taskContext.signal };
 }
 
 async function renderSourceCommandHelpText(
@@ -880,27 +898,33 @@ async function renderSourceCommandHelpTextRecord(
       if (supervisor.signal.aborted) {
         return;
       }
-      // Known issue: loading the bundled browser plugin through the CLI's
-      // normal plugin loader can throw even with a fully-populated,
-      // unmodified environment (reproducible outside this script too). Don't
-      // let that abort the whole render group and discard every other
-      // already-rendered command's help text - fall back to an empty string
-      // for "browser" instead.
-      if (commandName === "browser") {
-        try {
-          helpTexts[commandName] = await renderSourceCommandHelpText(commandName, renderContext);
-        } catch (error) {
-          console.warn(
-            `[write-cli-startup-metadata] Skipping precomputed browser help text: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          helpTexts[commandName] = "";
-        }
-        return;
-      }
       try {
-        helpTexts[commandName] = await supervisor.run(async (taskContext) =>
-          renderSourceCommandHelpText(commandName, renderContext, taskContext),
-        );
+        helpTexts[commandName] = await supervisor.run(async (taskContext) => {
+          try {
+            const effectiveTaskContext =
+              commandName === "browser" ? withoutGroupAbort(taskContext) : taskContext;
+            return await renderSourceCommandHelpText(
+              commandName,
+              renderContext,
+              effectiveTaskContext,
+            );
+          } catch (error) {
+            // Known issue: loading the bundled browser plugin through the
+            // CLI's normal plugin loader can throw even with a fully
+            // populated, unmodified environment (reproducible outside this
+            // script too). Don't let that abort the whole render group and
+            // discard every other already-rendered command's help text -
+            // fall back to an empty string for "browser" instead. Other
+            // commands keep aborting the group on failure as before.
+            if (commandName !== "browser") {
+              throw error;
+            }
+            console.warn(
+              `[write-cli-startup-metadata] Skipping precomputed browser help text: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return "";
+          }
+        });
       } catch {
         // Keep the mapper fulfilled so p-map waits for every active process-tree drain.
       }
